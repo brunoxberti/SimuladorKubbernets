@@ -1,3 +1,4 @@
+// g++ -pthread -o kuber Kubernets.cpp
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -6,14 +7,14 @@
 #include <pthread.h>
 
 #define usToms 1000
-#define numThreads 10
+#define numWorkers 10
 #define simulationLenghtScheduler 1500
-#define numJobs 120
+#define numPods 120
 #define maxFails 15
 
 int simulationLenghtThread = 5000;
 
-struct POD
+struct WORKER
 {
     pthread_t thread;
     int id;
@@ -23,7 +24,7 @@ struct POD
     int discSpeed;    // in mb/s
 };
 
-struct Job
+struct POD
 {
     int requiredCycles;
     int requiredMemory;
@@ -32,16 +33,16 @@ struct Job
     bool failed;
 };
 
-std::vector<POD> pods;
-std::list<Job> jobs;
-Job *assignedJobs;
+std::vector<WORKER> workers;
+std::list<POD> pods;
+POD *assignedPods;
 pthread_mutex_t mutexAssigned = PTHREAD_MUTEX_INITIALIZER;
 
 long *workTime;
 long *waitTime;
-int *completedJobs;
+int *completedPods;
 
-int calculaTimeToWork(Job jobAtual, POD podAtual)
+int calculaTimeToWork(POD jobAtual, WORKER podAtual)
 {
     int timeToWork = 0;
     timeToWork += jobAtual.requiredCycles / podAtual.cpuSpeed;
@@ -52,26 +53,25 @@ int calculaTimeToWork(Job jobAtual, POD podAtual)
     return timeToWork;
 }
 
-Job createEmptyJob()
+POD createEmptyPod()
 {
-    Job jobToReturn;
-    jobToReturn.requiredCycles = 0;
-    jobToReturn.requiredMemory = 0;
-    jobToReturn.requiredDisc = 0;
-    jobToReturn.completed = false;
-    jobToReturn.failed = false;
-    return jobToReturn;
+    POD podToReturn;
+    podToReturn.requiredCycles = 0;
+    podToReturn.requiredMemory = 0;
+    podToReturn.requiredDisc = 0;
+    podToReturn.completed = false;
+    podToReturn.failed = false;
+    return podToReturn;
 }
 
 void *Trabalha(void *arg)
 {
     bool possuiTrabalho = false;
     // POD podAtual;
-    POD podAtual = *(POD *)arg;
-    printf("thread com id %d iniciada, com %d mhz de CPU, %d mb de memoria, %d ms de delay e %d mb/s de transferencia de memoria \n", podAtual.id, podAtual.cpuSpeed, podAtual.memory, podAtual.networkDelay, podAtual.discSpeed);
+    WORKER podAtual = *(WORKER *)arg;
+    printf("Worker com id %d iniciado, com %d mhz de CPU, %d mb de memoria, %d ms de delay e %d mb/s de transferencia de memoria \n", podAtual.id, podAtual.cpuSpeed, podAtual.memory, podAtual.networkDelay, podAtual.discSpeed);
     pthread_mutex_lock(&mutexAssigned);
-    Job jobAtual = assignedJobs[podAtual.id];
-    // printf("ciclos atuais %d \n", jobAtual.requiredCycles);
+    POD jobAtual = assignedPods[podAtual.id];
     pthread_mutex_unlock(&mutexAssigned);
     int timeToWork = 0;
     for (size_t i = 0; i < simulationLenghtThread; i++)
@@ -81,8 +81,8 @@ void *Trabalha(void *arg)
             usleep(50 * usToms);
             waitTime[podAtual.id] = waitTime[podAtual.id] + 50;
             pthread_mutex_lock(&mutexAssigned);
-            if (!assignedJobs[podAtual.id].completed && !assignedJobs[podAtual.id].failed)
-                jobAtual = assignedJobs[podAtual.id];
+            if (!assignedPods[podAtual.id].completed && !assignedPods[podAtual.id].failed)
+                jobAtual = assignedPods[podAtual.id];
             pthread_mutex_unlock(&mutexAssigned);
             if (jobAtual.requiredCycles != 0)
                 possuiTrabalho = true;
@@ -97,9 +97,9 @@ void *Trabalha(void *arg)
                 jobAtual.failed = true;
                 // printf("Trabalho falhado pela thread %d \n", podAtual.id);
                 pthread_mutex_lock(&mutexAssigned);
-                assignedJobs[podAtual.id] = jobAtual;
+                assignedPods[podAtual.id] = jobAtual;
                 pthread_mutex_unlock(&mutexAssigned);
-                jobAtual = createEmptyJob();
+                jobAtual = createEmptyPod();
             }
 
             if (!jobAtual.failed)
@@ -110,21 +110,21 @@ void *Trabalha(void *arg)
                 possuiTrabalho = false;
                 // printf("Trabalho acabado pela thread %d \n", podAtual.id);
                 pthread_mutex_lock(&mutexAssigned);
-                assignedJobs[podAtual.id] = jobAtual;
+                assignedPods[podAtual.id] = jobAtual;
                 pthread_mutex_unlock(&mutexAssigned);
-                jobAtual = createEmptyJob();
+                jobAtual = createEmptyPod();
 
                 workTime[podAtual.id] = workTime[podAtual.id] + timeToWork;
-                completedJobs[podAtual.id] = completedJobs[podAtual.id] + 1;
+                completedPods[podAtual.id] = completedPods[podAtual.id] + 1;
             }
         }
     }
     return NULL;
 }
 
-POD createRandomPOD(int id)
+WORKER createRandomWorker(int id)
 {
-    POD podToReturn;
+    WORKER podToReturn;
     podToReturn.id = id;
     podToReturn.cpuSpeed = (rand() % 4000) + 1000;  // Fromm 1-5 GHz
     podToReturn.memory = (rand() % 7000) + 1000;    // 1-8 GB
@@ -133,9 +133,9 @@ POD createRandomPOD(int id)
     return podToReturn;
 }
 
-Job createRandomJob()
+POD createRandomJob()
 {
-    Job jobToReturn;
+    POD jobToReturn;
     jobToReturn.requiredCycles = (rand() % 28000) + 2000;
     jobToReturn.requiredMemory = (rand() % 3200) + 800;
     jobToReturn.requiredDisc = (rand() % 930) + 70;
@@ -144,43 +144,43 @@ Job createRandomJob()
     return jobToReturn;
 }
 
-bool daParaOPrimeiroDisponivel(Job trabalho)
+bool daParaOPrimeiroDisponivel(POD trabalho)
 {
-    for (int i = 0; i < numThreads; i++)
+    for (int i = 0; i < numWorkers; i++)
     {
-        if (assignedJobs[i].requiredCycles == 0)
+        if (assignedPods[i].requiredCycles == 0)
         {
-            assignedJobs[i] = trabalho;
+            assignedPods[i] = trabalho;
             return true;
         }
     }
     return false;
 }
 
-bool daParaOPrimeiroComMem(Job trabalho)
+bool daParaOPrimeiroComMem(POD trabalho)
 {
-    for (int i = 0; i < numThreads; i++)
+    for (int i = 0; i < numWorkers; i++)
     {
-        if (assignedJobs[i].requiredCycles == 0 && trabalho.requiredMemory < pods[i].memory)
+        if (assignedPods[i].requiredCycles == 0 && trabalho.requiredMemory < workers[i].memory)
         {
-            assignedJobs[i] = trabalho;
+            assignedPods[i] = trabalho;
             return true;
         }
     }
     return false;
 }
 
-bool daParaOComMaisClock(Job trabalho)
+bool daParaOComMaisClock(POD trabalho)
 {
     int maisRapidoDisponivel = -1;
     int velocidadeDoMaisRapido = 0;
-    for (int i = 0; i < numThreads; i++)
+    for (int i = 0; i < numWorkers; i++)
     {
-        if (assignedJobs[i].requiredCycles == 0 && trabalho.requiredMemory < pods[i].memory)
+        if (assignedPods[i].requiredCycles == 0 && trabalho.requiredMemory < workers[i].memory)
         {
-            if (velocidadeDoMaisRapido < pods[i].cpuSpeed)
+            if (velocidadeDoMaisRapido < workers[i].cpuSpeed)
             {
-                velocidadeDoMaisRapido = pods[i].cpuSpeed;
+                velocidadeDoMaisRapido = workers[i].cpuSpeed;
                 maisRapidoDisponivel = i;
             }
         }
@@ -188,17 +188,17 @@ bool daParaOComMaisClock(Job trabalho)
     if (maisRapidoDisponivel == -1)
         return false;
 
-    assignedJobs[maisRapidoDisponivel] = trabalho;
+    assignedPods[maisRapidoDisponivel] = trabalho;
     return true;
 }
 
-void limpaJobsCompletos()
+void limpaPodsCompletos()
 {
-    for (int i = 0; i < numThreads; i++)
+    for (int i = 0; i < numWorkers; i++)
     {
-        if (assignedJobs[i].completed)
+        if (assignedPods[i].completed)
         {
-            assignedJobs[i] = createEmptyJob();
+            assignedPods[i] = createEmptyPod();
             // printf("limpando job completo \n");
         }
     }
@@ -206,34 +206,34 @@ void limpaJobsCompletos()
 
 void limpaJobsCompletosEFalhados()
 {
-    Job trabalhoFalhado;
-    for (int i = 0; i < numThreads; i++)
+    POD trabalhoFalhado;
+    for (int i = 0; i < numWorkers; i++)
     {
-        if (assignedJobs[i].completed)
+        if (assignedPods[i].completed)
         {
-            assignedJobs[i] = createEmptyJob();
+            assignedPods[i] = createEmptyPod();
             // printf("limpando job completo \n");
         }
-        else if (assignedJobs[i].failed)
+        else if (assignedPods[i].failed)
         {
-            trabalhoFalhado = assignedJobs[i];
-            assignedJobs[i] = createEmptyJob();
+            trabalhoFalhado = assignedPods[i];
+            assignedPods[i] = createEmptyPod();
             trabalhoFalhado.failed = false;
-            jobs.push_front(trabalhoFalhado);
+            pods.push_front(trabalhoFalhado);
         }
     }
 }
 
-bool daParaOMaisRapido(Job trabalho)
+bool daParaOMaisRapido(POD trabalho)
 {
     int maisRapidoDisponivel = -1;
     int TempoDoMaisRapido = 9999999;
     int tempoDoPodAtual = -1;
-    for (int i = 0; i < numThreads; i++)
+    for (int i = 0; i < numWorkers; i++)
     {
-        if (assignedJobs[i].requiredCycles == 0 && trabalho.requiredMemory < pods[i].memory)
+        if (assignedPods[i].requiredCycles == 0 && trabalho.requiredMemory < workers[i].memory)
         {
-            tempoDoPodAtual = calculaTimeToWork(trabalho, pods[i]);
+            tempoDoPodAtual = calculaTimeToWork(trabalho, workers[i]);
             if (TempoDoMaisRapido > tempoDoPodAtual)
             {
                 TempoDoMaisRapido = tempoDoPodAtual;
@@ -244,20 +244,20 @@ bool daParaOMaisRapido(Job trabalho)
     if (maisRapidoDisponivel == -1)
         return false;
 
-    assignedJobs[maisRapidoDisponivel] = trabalho;
+    assignedPods[maisRapidoDisponivel] = trabalho;
     return true;
 }
 
-bool daParaOMaisLento(Job trabalho)
+bool daParaOMaisLento(POD trabalho)
 {
     int maisLentoDisponivel = -1;
     int TempoDoMaisLento = -1;
     int tempoDoPodAtual = -1;
-    for (int i = 0; i < numThreads; i++)
+    for (int i = 0; i < numWorkers; i++)
     {
-        if (assignedJobs[i].requiredCycles == 0 && trabalho.requiredMemory < pods[i].memory)
+        if (assignedPods[i].requiredCycles == 0 && trabalho.requiredMemory < workers[i].memory)
         {
-            tempoDoPodAtual = calculaTimeToWork(trabalho, pods[i]);
+            tempoDoPodAtual = calculaTimeToWork(trabalho, workers[i]);
             if (TempoDoMaisLento < tempoDoPodAtual)
             {
                 TempoDoMaisLento = tempoDoPodAtual;
@@ -268,13 +268,13 @@ bool daParaOMaisLento(Job trabalho)
     if (maisLentoDisponivel == -1)
         return false;
 
-    assignedJobs[maisLentoDisponivel] = trabalho;
+    assignedPods[maisLentoDisponivel] = trabalho;
     return true;
 }
 
-POD criaPodMedio() // Em média leva 61ms para completar um job
+WORKER criaWorkerMedio() // Em média leva 61ms para completar um pod
 {
-    POD podToReturn;
+    WORKER podToReturn;
     podToReturn.id = -1;
     podToReturn.cpuSpeed = 3000;
     podToReturn.memory = 4500;
@@ -283,9 +283,9 @@ POD criaPodMedio() // Em média leva 61ms para completar um job
     return podToReturn;
 }
 
-bool DivideNoMeio(Job trabalho)
+bool DivideNoMeio(POD trabalho)
 {
-    int tempoDeTrabalho = calculaTimeToWork(trabalho, criaPodMedio());
+    int tempoDeTrabalho = calculaTimeToWork(trabalho, criaWorkerMedio());
 
     if (tempoDeTrabalho > 61)
         return daParaOMaisRapido(trabalho);
@@ -296,29 +296,29 @@ bool DivideNoMeio(Job trabalho)
 int main(void)
 {
     srand(time(NULL));
-    assignedJobs = new Job[numThreads];
-    workTime = new long[numThreads];
-    waitTime = new long[numThreads];
-    completedJobs = new int[numThreads];
-    for (int i = 0; i < numThreads; i++)
+    assignedPods = new POD[numWorkers];
+    workTime = new long[numWorkers];
+    waitTime = new long[numWorkers];
+    completedPods = new int[numWorkers];
+    for (int i = 0; i < numWorkers; i++)
     {
-        pods.push_back(createRandomPOD(i));
+        workers.push_back(createRandomWorker(i));
     }
-    for (int i = 0; i < numJobs; i++)
+    for (int i = 0; i < numPods; i++)
     {
-        jobs.push_back(createRandomJob());
+        pods.push_back(createRandomJob());
     }
 
-    for (int i = 0; i < numThreads; i++)
+    for (int i = 0; i < numWorkers; i++)
     {
-        pthread_create(&(pods[i].thread), NULL, Trabalha, static_cast<void *>(&pods[i]));
+        pthread_create(&(workers[i].thread), NULL, Trabalha, static_cast<void *>(&workers[i]));
     }
 
     int falhasSeguidas = 0;
     int cycles = 0;
-    while (falhasSeguidas < numThreads && jobs.size() > 0 && cycles < simulationLenghtScheduler)
+    while (falhasSeguidas < numWorkers && pods.size() > 0 && cycles < simulationLenghtScheduler)
     {
-        if (DivideNoMeio(jobs.back()))
+        if (DivideNoMeio(pods.back()))
         {
             falhasSeguidas = 0;
             usleep(25 * usToms);
@@ -326,38 +326,38 @@ int main(void)
         else
         {
             falhasSeguidas++;
-            jobs.push_front(jobs.back());
+            pods.push_front(pods.back());
             usleep(15 * usToms);
         }
-        jobs.pop_back();
-        limpaJobsCompletos();
+        pods.pop_back();
+        limpaPodsCompletos();
         cycles++;
     }
     simulationLenghtThread = 0;
 
-    if (falhasSeguidas >= numThreads)
+    if (falhasSeguidas >= numWorkers)
         printf("\nPrograma acabou por alto numero de falhas seguidas\n");
-    else if (jobs.size() == 0)
-        printf("\nPrograma acabou pois completou todos os jobs foram completos\n");
+    else if (pods.size() == 0)
+        printf("\nPrograma acabou pois completou todos os pods foram completos\n");
     else if (cycles >= simulationLenghtScheduler)
         printf("\nPrograma acabou pois acabou os ciclos de scheduler\n");
 
     // Dando Join
-    for (int i = 0; i < numThreads; i++)
+    for (int i = 0; i < numWorkers; i++)
     {
-        pthread_join((pods[i].thread), NULL);
+        pthread_join((workers[i].thread), NULL);
     }
 
     printf("Join feitos\n");
 
-    for (int i = 0; i < numThreads; i++)
+    for (int i = 0; i < numWorkers; i++)
     {
-        printf("A Thread %d completou %d jobs, trabalhando por %ld ms e esperando por %ld \n", i, completedJobs[i], workTime[i], waitTime[i]);
+        printf("o Worker %d completou %d pods, trabalhando por %ld ms e esperando por %ld \n", i, completedPods[i], workTime[i], waitTime[i]);
     }
 
     long trabalhoTotal = 0;
     long esperaTotal = 0;
-    for (int i = 0; i < numThreads; i++)
+    for (int i = 0; i < numWorkers; i++)
     {
         trabalhoTotal += workTime[i];
         esperaTotal += waitTime[i];
